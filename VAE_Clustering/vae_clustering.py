@@ -13,7 +13,7 @@ os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 
 batch_size = 100
 learning_rate = 0.001
-num_epoch = 200
+num_epoch = 100
 num_cluster = 10
 dim_z = 5
 
@@ -100,14 +100,13 @@ writer.close()
 # Train
 start_time = time.time()
 # 1) run with a random initialization
-#sess.run(tf.global_variables_initializer())
+sess.run(tf.global_variables_initializer())
 # 2) run with a saved model
-saver = tf.train.Saver()
-saver.restore(sess, './model/model.ckpt')
+#saver = tf.train.Saver()
+#saver.restore(sess, './model/model.ckpt')
 
 num_batches = int(mnist.train.num_examples / batch_size)
 for i in range(num_epoch):
-    break
     total_loss = 0
     for batch_id in range(num_batches):
         x_batch, y_batch = mnist.train.next_batch(batch_size)
