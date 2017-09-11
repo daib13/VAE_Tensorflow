@@ -1,2 +1,6 @@
-model_checkpoint_path: "model.ckpt"
-all_model_checkpoint_paths: "model.ckpt"
+model_checkpoint_path: "VAE27499"
+all_model_checkpoint_paths: "VAE25299"
+all_model_checkpoint_paths: "VAE25849"
+all_model_checkpoint_paths: "VAE26399"
+all_model_checkpoint_paths: "VAE26949"
+all_model_checkpoint_paths: "VAE27499"
