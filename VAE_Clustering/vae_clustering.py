@@ -11,11 +11,104 @@ import os
 os.environ['TF_MIN_GPU_MULTIPROCESSOR_COUNT'] = '6'
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 
-batch_size = 100
-learning_rate = 0.001
-num_epoch = 100
-num_cluster = 10
-dim_z = 5
+BATCH_SIZE = 100
+LEARNING_rATE = 0.001
+NUM_EPOCH = 100
+NUM_CLUSTER = 10
+DIM_Z = 5
+
+
+class VAECluster:
+    """Build the graph for VAECluster"""
+    def __init__(self, batch_size, img_height, img_width,
+                 hidden_dim, latent_dim, num_hidden, num_cluster, learning_rate):
+        self.batch_size = batch_size
+        self.img_height = img_height
+        self.img_width = img_width
+        self.input_dim = img_height * img_width
+        self.hidden_dim = hidden_dim
+        self.latent_dim = latent_dim
+        self.num_hidden = num_hidden
+        self.num_cluster = num_cluster
+        self.learning_rate = learning_rate
+        self.global_step = tf.Variable(0, dtype=tf.int32, trainable=False, name='global_step')
+
+    def __create_placeholders(self):
+        """Create placeholders for input"""
+        self.x = tf.placeholder(tf.float32, [self.batch_size, self.input_dim], name='x')
+
+    def __create_encoder(self):
+        """Create the encoder"""
+        self.encoder_w = []
+        self.encoder_b = []
+        self.encoder = []
+        self.encoder_activate = []
+        self.previous_dim = self.input_dim
+        self.previous_tensor = self.x
+        for i_hidden in range(self.num_hidden):
+            self.encoder_w.append(tf.get_variable('encoder_w'+str(i_hidden), [self.input_dim, self.hidden_dim],
+                                                  tf.float32, tf.contrib.layers.xavier_initializer(), trainable=True))
+            self.encoder_b.append(tf.Variable(tf.zeros([self.hidden_dim]), True, dtype=tf.float32,
+                                              name='encoder_b'+str(i_hidden)))
+            self.encoder.append(tf.matmul(self.previous_tensor, self.encoder_w[i_hidden]) + self.encoder_b[i_hidden])
+            self.encoder_activate.append(tf.nn.tanh(self.encoder[i_hidden]))
+            self.previous_dim = self.hidden_dim
+            self.previous_tensor = self.encoder_activate[i_hidden]
+
+    def __create_latent(self):
+        """Create latent space"""
+        self.mu_z_w = tf.get_variable('mu_z_w', [self.previous_dim, self.latent_dim], tf.float32,
+                                      tf.contrib.layers.xavier_initializer(), trainable=True)
+        self.mu_z_b = tf.Variable(tf.zeros([self.latent_dim]), True, name='mu_z_b')
+        self.mu_z = tf.matmul(self.previous_tensor, self.mu_z_w) + self.mu_z_b
+        self.logsd_z_w = tf.get_variable('logsd_z_w', [self.previous_dim, self.latent_dim], tf.float32,
+                                         tf.contrib.layers.xavier_initializer(), trainable=True)
+        self.logsd_z_b = tf.Variable(tf.zeros([self.latent_dim]), True, name='logsd_z_b')
+        self.logsd_z = tf.matmul(self.previous_tensor, self.logsd_z_w) + self.logsd_z_b
+        self.sd_z = tf.exp(self.logsd_z)
+
+    def __create_decoder(self):
+        """Create the decoder"""
+        self.noise = tf.random_normal([self.batch_size, self.latent_dim], dtype=tf.float32, name='noise')
+        self.z = tf.multiply(self.noise, self.sd_z) + self.mu_z
+        self.previous_dim = self.latent_dim
+        self.previous_tensor = self.z
+
+        self.decoder1_w = []
+        self.decoder1_b = []
+        self.decoder1 = []
+        for i_cluster in range(self.num_cluster):
+            self.decoder1_w.append(tf.get_variable('decoder_w1_'+str(i_cluster), [self.previous_dim, self.hidden_dim],
+                                                   tf.float32, tf.contrib.layers.xavier_initializer(), trainable=True))
+            self.decoder1_b.append(tf.Variable(tf.zeros([self.hidden_dim]), True, dtype=tf.float32,
+                                               name='decoder_b1_'+str(i_cluster)))
+            self.decoder1.append(tf.matmul(self.previous_tensor, self.decoder1_w[i_cluster])
+                                 + self.decoder1_b[i_cluster])
+        self.decoder1_concat = tf.concat(self.decoder1, 0, 'decoder1_concat')
+        self.decoder1_activate = tf.nn.tanh(self.decoder1_concat)
+        self.previous_dim = self.hidden_dim
+        self.previous_tensor = self.decoder1_activate
+        self.decoder_w = []
+        self.decoder_b = []
+        self.decoder = []
+        self.decoder_activate = []
+        for i_hidden in range(1, self.num_hidden):
+            self.decoder_w.append(tf.get_variable('decoder_w'+str(i_hidden), [self.previous_dim, self.hidden_dim],
+                                                  tf.float32, tf.contrib.layers.xavier_initializer(), trainable=True))
+            self.decoder_b.append(tf.Variable(tf.zeros[self.hidden_dim], True, dtype=tf.float32,
+                                              name='decoder_b'+str(i_hidden)))
+            self.decoder.append(tf.matmul(self.previous_tensor, decoder_w[i_hidden]) + self.decoder_b[i_hidden])
+            self.decoder_activate.append(tf.nn.tanh(self.decoder[i_hidden]))
+            self.previous_dim = self.hidden_dim
+            self.previous_tensor = self.decoder_activate[i_hidden]
+        self.decoder_final_w = tf.get_variable('decoder_final_w', [self.previous_dim, self.input_dim],
+                                               tf.float32, tf.contrib.layers.xavier_initializer(), trainable=True)
+        self.decoder_final_b = tf.Variable(tf.zeros([self.input_dim]), True, dtype=tf.float32, name='decoder_final_b')
+        self.decoder_final = tf.matmul(self.previous_tensor, self.decoder_final_w) + self.decoder_final_b
+        self.x_hat = tf.nn.sigmoid(self.decoder_final)
+
+    def __create_posterior(self):
+
 
 # build the network
 x = tf.placeholder(tf.float32, [batch_size, 784], name='x')

@@ -134,7 +134,7 @@ class VAE:
                 self.previous_tensor = self.generate_decoder_activate[i_hidden]
             self.generate_decoder_final = tf.matmul(self.previous_tensor, self.decoder_final_w) + self.decoder_final_b
             self.generate_x_hat = tf.reshape(tf.nn.sigmoid(self.generate_decoder_final, 'x_hat'),
-                                             [self.batch_size, self.img_height, self.img_width])
+                                             [self.batch_size, self.img_height, self.img_width, 1])
 
     def __create_reconstruct(self):
         """Create reconstruct module"""
@@ -152,8 +152,9 @@ class VAE:
             self.reconstruct_decoder_final = tf.matmul(self.previous_tensor, self.decoder_final_w) \
                                              + self.decoder_final_b
             self.reconstruct_x_hat = tf.nn.sigmoid(self.reconstruct_decoder_final)
-#            self.reconstruct_error_l2 = tf.reduce_sum(tf.square(self.x - self.reconstruct_x_hat), 'error_l2') / self.batch_size
-#            self.reconstruct_gt_l2 = tf.reduce_sum(tf.square(self.x), 'gt_l2') / self.batch_size
+            self.reconstruct_error_l2 = tf.reduce_sum(tf.square(self.x - self.reconstruct_x_hat)) / self.batch_size
+            self.reconstruct_gt_l2 = tf.reduce_sum(tf.square(self.x)) / self.batch_size
+            self.reconstruct_nmse = tf.divide(self.reconstruct_error_l2, self.reconstruct_gt_l2)
 
     def __create_optimizer(self):
         """Create optimizer"""
@@ -167,7 +168,8 @@ class VAE:
             self.summary_klloss = tf.summary.scalar('klloss', self.klloss)
             self.summary_train = tf.summary.merge([self.summary_loss, self.summary_generate_loss, self.summary_klloss])
 
-            self.summary_generate = tf.summary.image('generate', self.generate_x_hat, 10)
+            self.summary_generate = tf.summary.image('generate', self.generate_x_hat, 3)
+            self.summary_reconstruct = tf.summary.scalar('nmse', self.reconstruct_nmse)
 
     def build_graph(self):
         """Build the graph for VAE"""
@@ -194,6 +196,8 @@ def train_model(model, train_data, test_data, num_epoch):
             saver.restore(sess, ckpt.model_checkpoint_path)
 
         total_loss = 0
+        total_error_l2 = 0
+        total_gt_l2 = 0
         writer = tf.summary.FileWriter('graph', sess.graph)
         initial_step = model.global_step.eval()
         num_batches = int(train_data.num_examples / model.batch_size)
@@ -202,15 +206,28 @@ def train_model(model, train_data, test_data, num_epoch):
         for index in range(initial_step, initial_step + num_train_steps):
             x_batch, y_batch = train_data.next_batch(model.batch_size)
             feed_dict = {model.x: x_batch}
-            batch_loss, _, summary = sess.run([model.loss, model.optimizer, model.summary_train], feed_dict=feed_dict)
+            batch_loss, _, summary, error_l2, gt_l2, summary_recon = sess.run([model.loss, model.optimizer,
+                                                                               model.summary_train,
+                                                                               model.reconstruct_error_l2,
+                                                                               model.reconstruct_gt_l2,
+                                                                                model.summary_reconstruct],
+                                                                              feed_dict=feed_dict)
             writer.add_summary(summary, index)
+            writer.add_summary(summary_recon, index)
             total_loss += batch_loss
+            total_error_l2 += error_l2
+            total_gt_l2 += gt_l2
             num_step += 1
             if (index + 1) % num_batches == 0:
-                print('Average loss at step {}: {:5.1f}'.format(index, total_loss / num_step))
+                print('Average loss at step {}: {:5.1f}. NMSE = {:5.1f}'.format(index, total_loss / num_step,
+                                                                                total_error_l2 / total_gt_l2))
                 total_loss = 0
+                total_error_l2 = 0
+                total_gt_l2 = 0
                 num_step = 0
                 saver.save(sess, 'model/VAE' + str(index))
+                summary = sess.run(model.summary_generate)
+                writer.add_summary(summary, index)
 
 
 def main(dataset):
