@@ -4,6 +4,8 @@ import time
 import numpy as np
 from PIL import Image
 
+from munkres import Munkres, print_matrix
+
 from tensorflow.examples.tutorials.mnist import input_data
 mnist = input_data.read_data_sets('/data/mnist', one_hot=True)
 
@@ -12,10 +14,12 @@ os.environ['TF_MIN_GPU_MULTIPROCESSOR_COUNT'] = '6'
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 
 BATCH_SIZE = 100
-LEARNING_rATE = 0.001
-NUM_EPOCH = 100
+LEARNING_RATE = 0.001
+NUM_EPOCH = 1000
 NUM_CLUSTER = 10
-DIM_Z = 5
+DIM_Z = 10
+IMG_HEIGHT = 28
+IMG_WIDTH = 28
 
 
 class VAECluster:
@@ -35,212 +39,269 @@ class VAECluster:
 
     def __create_placeholders(self):
         """Create placeholders for input"""
-        self.x = tf.placeholder(tf.float32, [self.batch_size, self.input_dim], name='x')
+        with tf.name_scope("input"):
+            self.x = tf.placeholder(tf.float32, [self.batch_size, self.input_dim], name='x')
+            self.y = tf.placeholder(tf.float32, [self.batch_size, self.num_cluster], name='y')
+            self.x_reshape = tf.reshape(self.x, [1, self.batch_size, self.input_dim], 'x_reshape')
+            self.x_duplicate = tf.tile(self.x_reshape, [self.num_cluster, 1, 1], 'x_duplicate')
+
+    def __create_encoder_weight(self):
+        """Create the weights for the encoder"""
+        with tf.name_scope("encoder_weight"):
+            self.encoder_w = []
+            self.encoder_b = []
+            self.previous_dim = self.input_dim
+            for i_hidden in range(self.num_hidden):
+                self.encoder_w.append(tf.get_variable('encoder_w' + str(i_hidden), [self.previous_dim, self.hidden_dim],
+                                                      tf.float32, tf.contrib.layers.xavier_initializer(),
+                                                      trainable=True))
+                self.encoder_b.append(tf.Variable(tf.zeros([self.hidden_dim]), True, dtype=tf.float32,
+                                                  name='encoder_b' + str(i_hidden)))
+                self.previous_dim = self.hidden_dim
+            self.mu_z_w = tf.get_variable('mu_z_w', [self.previous_dim, self.latent_dim], tf.float32,
+                                          tf.contrib.layers.xavier_initializer(), trainable=True)
+            self.mu_z_b = tf.Variable(tf.zeros([self.latent_dim]), True, name='mu_z_b')
+            self.logsd_z_w = tf.get_variable('logsd_z_w', [self.previous_dim, self.latent_dim], tf.float32,
+                                             tf.contrib.layers.xavier_initializer(), trainable=True)
+            self.logsd_z_b = tf.Variable(tf.zeros([self.latent_dim]), True, name='logsd_z_b')
+
+    def __create_decoder_weight(self):
+        """Create the weights for the decoder"""
+        with tf.name_scope("decoder_weight"):
+            self.decoder_w = []
+            self.decoder_b = []
+            self.previous_dim = self.latent_dim
+            self.decoder_w1 = []
+            self.decoder_b1 = []
+            for i_cluster in range(self.num_cluster):
+                self.decoder_w1.append(tf.get_variable('decoder_w1_'+str(i_cluster), [self.previous_dim, self.hidden_dim],
+                                                       tf.float32, tf.contrib.layers.xavier_initializer(),
+                                                       trainable=True))
+                self.decoder_b1.append(tf.Variable(tf.zeros([self.hidden_dim]), True, name='decoder_b1_'+str(i_cluster),
+                                                   dtype=tf.float32))
+            self.previous_dim = self.hidden_dim
+            self.decoder_w.append(self.decoder_w1)
+            self.decoder_b.append(self.decoder_b1)
+            for i_hidden in range(1, self.num_hidden):
+                self.decoder_w.append(tf.get_variable('decoder_w'+str(i_hidden), [self.previous_dim, self.hidden_dim],
+                                                      tf.float32, tf.contrib.layers.xavier_initializer(),
+                                                      trainable=True))
+                self.decoder_b.append(tf.Variable(tf.zeros([self.hidden_dim]), True, name='decoder_b'+str(i_hidden),
+                                                  dtype=tf.float32))
+            self.decoder_x_w = tf.get_variable('decoder_x_w', [self.previous_dim, self.input_dim], tf.float32,
+                                               tf.contrib.layers.xavier_initializer(), trainable=True)
+            self.decoder_x_b = tf.Variable(tf.zeros([self.input_dim]), True, name='decoder_x_b', dtype=tf.float32)
 
     def __create_encoder(self):
         """Create the encoder"""
-        self.encoder_w = []
-        self.encoder_b = []
-        self.encoder = []
-        self.encoder_activate = []
-        self.previous_dim = self.input_dim
-        self.previous_tensor = self.x
-        for i_hidden in range(self.num_hidden):
-            self.encoder_w.append(tf.get_variable('encoder_w'+str(i_hidden), [self.input_dim, self.hidden_dim],
-                                                  tf.float32, tf.contrib.layers.xavier_initializer(), trainable=True))
-            self.encoder_b.append(tf.Variable(tf.zeros([self.hidden_dim]), True, dtype=tf.float32,
-                                              name='encoder_b'+str(i_hidden)))
-            self.encoder.append(tf.matmul(self.previous_tensor, self.encoder_w[i_hidden]) + self.encoder_b[i_hidden])
-            self.encoder_activate.append(tf.nn.tanh(self.encoder[i_hidden]))
-            self.previous_dim = self.hidden_dim
-            self.previous_tensor = self.encoder_activate[i_hidden]
-
-    def __create_latent(self):
-        """Create latent space"""
-        self.mu_z_w = tf.get_variable('mu_z_w', [self.previous_dim, self.latent_dim], tf.float32,
-                                      tf.contrib.layers.xavier_initializer(), trainable=True)
-        self.mu_z_b = tf.Variable(tf.zeros([self.latent_dim]), True, name='mu_z_b')
-        self.mu_z = tf.matmul(self.previous_tensor, self.mu_z_w) + self.mu_z_b
-        self.logsd_z_w = tf.get_variable('logsd_z_w', [self.previous_dim, self.latent_dim], tf.float32,
-                                         tf.contrib.layers.xavier_initializer(), trainable=True)
-        self.logsd_z_b = tf.Variable(tf.zeros([self.latent_dim]), True, name='logsd_z_b')
-        self.logsd_z = tf.matmul(self.previous_tensor, self.logsd_z_w) + self.logsd_z_b
-        self.sd_z = tf.exp(self.logsd_z)
+        with tf.name_scope("encoder"):
+            self.encoder = []
+            self.encoder_activate = []
+            self.previous_dim = self.input_dim
+            self.previous_tensor = self.x
+            for i_hidden in range(self.num_hidden):
+                self.encoder.append(tf.matmul(self.previous_tensor, self.encoder_w[i_hidden]) + self.encoder_b[i_hidden])
+                self.encoder_activate.append(tf.nn.tanh(self.encoder[i_hidden]))
+                self.previous_dim = self.hidden_dim
+                self.previous_tensor = self.encoder_activate[i_hidden]
+            self.mu_z = tf.matmul(self.previous_tensor, self.mu_z_w) + self.mu_z_b
+            self.logsd_z = tf.matmul(self.previous_tensor, self.logsd_z_w) + self.logsd_z_b
+            self.sd_z = tf.exp(self.logsd_z)
 
     def __create_decoder(self):
         """Create the decoder"""
-        self.noise = tf.random_normal([self.batch_size, self.latent_dim], dtype=tf.float32, name='noise')
-        self.z = tf.multiply(self.noise, self.sd_z) + self.mu_z
-        self.previous_dim = self.latent_dim
-        self.previous_tensor = self.z
-
-        self.decoder1_w = []
-        self.decoder1_b = []
-        self.decoder1 = []
-        for i_cluster in range(self.num_cluster):
-            self.decoder1_w.append(tf.get_variable('decoder_w1_'+str(i_cluster), [self.previous_dim, self.hidden_dim],
-                                                   tf.float32, tf.contrib.layers.xavier_initializer(), trainable=True))
-            self.decoder1_b.append(tf.Variable(tf.zeros([self.hidden_dim]), True, dtype=tf.float32,
-                                               name='decoder_b1_'+str(i_cluster)))
-            self.decoder1.append(tf.matmul(self.previous_tensor, self.decoder1_w[i_cluster])
-                                 + self.decoder1_b[i_cluster])
-        self.decoder1_concat = tf.concat(self.decoder1, 0, 'decoder1_concat')
-        self.decoder1_activate = tf.nn.tanh(self.decoder1_concat)
-        self.previous_dim = self.hidden_dim
-        self.previous_tensor = self.decoder1_activate
-        self.decoder_w = []
-        self.decoder_b = []
-        self.decoder = []
-        self.decoder_activate = []
-        for i_hidden in range(1, self.num_hidden):
-            self.decoder_w.append(tf.get_variable('decoder_w'+str(i_hidden), [self.previous_dim, self.hidden_dim],
-                                                  tf.float32, tf.contrib.layers.xavier_initializer(), trainable=True))
-            self.decoder_b.append(tf.Variable(tf.zeros[self.hidden_dim], True, dtype=tf.float32,
-                                              name='decoder_b'+str(i_hidden)))
-            self.decoder.append(tf.matmul(self.previous_tensor, decoder_w[i_hidden]) + self.decoder_b[i_hidden])
-            self.decoder_activate.append(tf.nn.tanh(self.decoder[i_hidden]))
+        with tf.name_scope("sampling"):
+            self.noise = tf.random_normal([self.batch_size, self.latent_dim], dtype=tf.float32, name='noise')
+            self.z = tf.multiply(self.noise, self.sd_z) + self.mu_z
+            self.previous_dim = self.latent_dim
+            self.previous_tensor = self.z
+        with tf.name_scope("decoder"):
+            self.decoder1 = []
+            for i_cluster in range(self.num_cluster):
+                self.decoder1.append(tf.matmul(self.previous_tensor, self.decoder_w1[i_cluster])
+                                     + self.decoder_b1[i_cluster])
+            self.decoder1_concat = tf.concat(self.decoder1, 0, 'decoder1_concat')
+            self.decoder1_activate = tf.nn.tanh(self.decoder1_concat)
             self.previous_dim = self.hidden_dim
-            self.previous_tensor = self.decoder_activate[i_hidden]
-        self.decoder_final_w = tf.get_variable('decoder_final_w', [self.previous_dim, self.input_dim],
-                                               tf.float32, tf.contrib.layers.xavier_initializer(), trainable=True)
-        self.decoder_final_b = tf.Variable(tf.zeros([self.input_dim]), True, dtype=tf.float32, name='decoder_final_b')
-        self.decoder_final = tf.matmul(self.previous_tensor, self.decoder_final_w) + self.decoder_final_b
-        self.x_hat = tf.nn.sigmoid(self.decoder_final)
+            self.previous_tensor = self.decoder1_activate
+            self.decoder = [self.decoder1_concat]
+            self.decoder_activate = [self.decoder1_activate]
+            for i_hidden in range(1, self.num_hidden):
+                self.decoder.append(tf.matmul(self.previous_tensor, self.decoder_w[i_hidden]) + self.decoder_b[i_hidden])
+                self.decoder_activate.append(tf.nn.tanh(self.decoder[i_hidden]))
+                self.previous_dim = self.hidden_dim
+                self.previous_tensor = self.decoder_activate[i_hidden]
+            self.decoder_final = tf.matmul(self.previous_tensor, self.decoder_x_w) + self.decoder_x_b
+            self.x_hat = tf.nn.sigmoid(self.decoder_final)
+            self.x_hat_reshape = tf.reshape(self.x_hat, [self.num_cluster, self.batch_size, self.input_dim])
+
+    def __create_generator(self):
+        """Create generator"""
+        with tf.name_scope("generator"):
+            self.generator_decoder1 = []
+            self.previous_tensor = self.noise
+            self.previous_dim = self.latent_dim
+            for i_cluster in range(self.num_cluster):
+                self.generator_decoder1.append(tf.matmul(self.previous_tensor, self.decoder_w1[i_cluster])
+                                               + self.decoder_b1[i_cluster])
+            self.generator_decoder1_concat = tf.concat(self.generator_decoder1, 0, 'generator_decoder1_concat')
+            self.generator_decoder1_activate = tf.nn.tanh(self.generator_decoder1_concat)
+            self.previous_tensor = self.generator_decoder1_activate
+            self.previous_dim = self.hidden_dim
+            self.generator_decoder = [self.generator_decoder1_concat]
+            self.generator_decoder_activate = [self.generator_decoder1_activate]
+            for i_hidden in range(1, self.num_hidden):
+                self.generator_decoder.append(tf.matmul(self.previous_tensor, self.decoder_w[i_hidden])
+                                              + self.decoder_b[i_hidden])
+                self.generator_decoder_activate.append(tf.nn.tanh(self.generator_decoder[i_hidden]))
+                self.previous_dim = self.hidden_dim
+                self.previous_tensor = self.generator_decoder_activate[i_hidden]
+            self.generator_decoder_final = tf.matmul(self.previous_tensor, self.decoder_x_w) + self.decoder_x_b
+            self.generator_x_hat = tf.nn.sigmoid(self.generator_decoder_final)
+            self.generator_x_hat_reshape = tf.reshape(self.generator_x_hat, [self.num_cluster*self.batch_size,
+                                                                             self.img_height, self.img_width, 1])
 
     def __create_posterior(self):
+        """Create posterior"""
+        with tf.name_scope("prior"):
+            self.prior_logit = tf.Variable(tf.zeros([self.num_cluster, 1]), False, dtype=tf.float32, name='prior_logit')
+            self.prior = tf.nn.softmax(self.prior_logit, 0, 'prior')
+        with tf.name_scope("posterior"):
+            self.logp_x_yz_dim = - tf.multiply(self.x_duplicate, tf.log(self.x_hat_reshape + 1e-12)) \
+                                - tf.multiply(1-self.x_duplicate, tf.log(1-self.x_hat_reshape + 1e-12))
+            self.logp_x_yz = tf.reduce_sum(self.logp_x_yz_dim, 2)
+            self.logp_xy_z = self.logp_x_yz + tf.log(self.prior)
+            self.posterior = tf.nn.softmax(self.logp_xy_z, 0, 'posterior')
+            self.label = tf.argmax(self.posterior, 0, name='label')
+            self.label_gt = tf.argmax(self.y, 1, name='label_gt')
+
+    def __create_loss(self):
+        """Create loss"""
+        with tf.name_scope("loss"):
+            self.klloss_mu = tf.square(self.mu_z) / 2
+            self.klloss_sd = tf.square(self.sd_z) / 2 - self.logsd_z - 0.5
+            self.klloss = tf.reduce_sum(self.klloss_mu + self.klloss_sd, name='klloss')/self.batch_size
+            self.max_logp_xy_z = tf.reduce_max(self.logp_xy_z, 0, True)
+            self.res_logp_xy_z = self.logp_xy_z - tf.tile(self.max_logp_xy_z, [self.num_cluster, 1])
+            self.generate_loss = tf.reduce_sum(self.max_logp_xy_z
+                                               + tf.log(tf.reduce_sum(tf.exp(self.res_logp_xy_z), 0, True))) / self.batch_size
+            self.loss = self.klloss + self.generate_loss
+
+    def __create_optimizer(self):
+        """Create optimizer"""
+        with tf.name_scope("optimizer"):
+            self.optimizer = tf.train.AdamOptimizer(learning_rate=self.learning_rate).minimize(self.loss)
+
+    def __create_summary(self):
+        """Create summary"""
+        with tf.name_scope("summary"):
+            self.summary_loss = tf.summary.scalar('loss', self.loss)
+            self.summary_generate_loss = tf.summary.scalar('generate_loss', self.generate_loss)
+            self.summary_klloss = tf.summary.scalar('klloss', self.klloss)
+            self.summary = tf.summary.merge([self.summary_loss, self.summary_generate_loss, self.summary_klloss])
+        with tf.name_scope("summary_generator"):
+            self.summary_generator = tf.summary.image('generate_sample', self.generator_x_hat_reshape, 30)
+
+    def build_graph(self):
+        self.__create_placeholders()
+        self.__create_encoder_weight()
+        self.__create_decoder_weight()
+        self.__create_encoder()
+        self.__create_decoder()
+        self.__create_generator()
+        self.__create_posterior()
+        self.__create_loss()
+        self.__create_optimizer()
+        self.__create_summary()
 
 
-# build the network
-x = tf.placeholder(tf.float32, [batch_size, 784], name='x')
+def train_model(model, data, epoch):
+    saver = tf.train.Saver()
+    if not os.path.exists('./model'):
+        os.mkdir('./model')
 
-encoder1_w = tf.get_variable(shape=[784, 200], trainable=True, name='encoder1_w', initializer=tf.contrib.layers.xavier_initializer())
-encoder1_b = tf.Variable(tf.zeros([200]), trainable=True, name='encoder1_b')
-encoder1 = tf.matmul(x, encoder1_w) + encoder1_b
-encoder1_tanh = tf.nn.tanh(encoder1)
+    with tf.Session() as sess:
+        sess.run(tf.global_variables_initializer())
+        ckpt = tf.train.get_checkpoint_state(os.path.dirname('./model/checkpoint'))
+        if ckpt and ckpt.model_checkpoint_path:
+            saver.restore(sess, ckpt.model_checkpoint_path)
 
-encoder2_w = tf.get_variable(shape=[200, 200], trainable=True, name='encoder2_w', initializer=tf.contrib.layers.xavier_initializer())
-encoder2_b = tf.Variable(tf.zeros([200]), trainable=True, name='encoder2_b')
-encoder2 = tf.matmul(encoder1, encoder2_w) + encoder2_b
-encoder2_tanh = tf.nn.tanh(encoder2)
+        writer = tf.summary.FileWriter('./graph', sess.graph)
+        initial_step = model.global_step.eval()
+        batch_per_epoch = int(data.num_examples / model.batch_size)
+        num_steps = batch_per_epoch * epoch
+        total_loss = 0
+        for index in range(initial_step, initial_step+num_steps):
+            x_batch, y_batch = data.next_batch(model.batch_size)
+            feed_dict = {model.x: x_batch}
+            batch_loss, _, summary = sess.run([model.loss, model.optimizer, model.summary], feed_dict=feed_dict)
+            total_loss += batch_loss
+            writer.add_summary(summary, index)
+            if (index+1)%batch_per_epoch == 0:
+                print('Global step = {0}. Average loss = {1}.'.format(index, total_loss/batch_per_epoch))
+                total_loss = 0
+                saver.save(sess, 'model/VAE_Clustering' + str(index))
+                summary = sess.run(model.summary_generator)
+                writer.add_summary(summary, index)
 
-mu_z_w = tf.get_variable(shape=[200, dim_z], trainable=True, name='mu_z_w', initializer=tf.contrib.layers.xavier_initializer())
-mu_z_b = tf.Variable(tf.zeros([dim_z]), trainable=True, name='mu_z_b')
-mu_z = tf.matmul(encoder2_tanh, mu_z_w) + mu_z_b
 
-logsd_z_w = tf.get_variable(shape=[200, dim_z], trainable=True, name='logsd_z_w', initializer=tf.contrib.layers.xavier_initializer())
-logsd_z_b = tf.Variable(tf.zeros([dim_z]), trainable=True, name='logsd_z_b')
-logsd_z = tf.matmul(encoder2_tanh, logsd_z_w) + logsd_z_b
+def test_model(model, data):
+    y_pred = list()
+    y_gt = list()
+    saver = tf.train.Saver()
+    with tf.Session() as sess:
+        sess.run(tf.global_variables_initializer())
+        ckpt = tf.train.get_checkpoint_state(os.path.dirname('./model/checkpoint'))
+        if ckpt and ckpt.model_checkpoint_path:
+            saver.restore(sess, ckpt.model_checkpoint_path)
 
-sd_z = tf.exp(logsd_z)
-var_z = tf.square(sd_z)
+        batch_per_epoch = int(data.num_examples / model.batch_size)
+        for index in range(batch_per_epoch):
+            x_batch, y_batch = data.next_batch(model.batch_size)
+            feed_dict = {model.x: x_batch, model.y: y_batch}
+            prior, posterior, label, label_gt = sess.run([model.prior, model.posterior, model.label, model.label_gt], feed_dict=feed_dict)
+            y_gt += list(label_gt)
+            y_pred += list(label)
+    assignment = np.zeros([model.num_cluster, model.num_cluster])
+    for i in range(len(y_pred)):
+        assignment[y_pred[i]][y_gt[i]] += 1
+    m = Munkres()
+    indexes = m.compute(-assignment)
+    total_cost = 0
+    for row,col in indexes:
+        total_cost += assignment[row][col]
+    accuracy = total_cost / len(y_gt)
+    print('{0} correct out of {1} samples. Accuracy = {2}.'.format(total_cost, len(y_gt), accuracy))
 
-loss_mu_z = tf.square(mu_z)
-loss_var_z = tf.subtract(var_z, 2*logsd_z) - 1
-klloss = tf.reduce_sum(loss_mu_z + loss_var_z) / batch_size / 2
 
-noise = tf.random_normal(shape=[batch_size, dim_z], dtype=tf.float32, name='noise')
-sample = mu_z + tf.multiply(sd_z, noise)
+def generate_sample(model):
+    saver = tf.train.Saver()
+    with tf.Session() as sess:
+        sess.run(tf.global_variables_initializer())
+        ckpt = tf.train.get_checkpoint_state(os.path.dirname('./model/checkpoint'))
+        if ckpt and ckpt.model_checkpoint_path:
+            saver.restore(sess, ckpt.model_checkpoint_path)
 
-decoder1_w = []
-decoder1_b = []
-decoder1 = []
-for cluster_id in range(num_cluster):
-    decoder1_w_name = 'decoder1_w' + str(cluster_id)
-    decoder1_b_name = 'decoder1_b' + str(cluster_id)
-    decoder1_w.append(tf.get_variable(shape=[dim_z, 200], trainable=True, name=decoder1_w_name, initializer=tf.contrib.layers.xavier_initializer()))
-    decoder1_b.append(tf.Variable(tf.zeros([200]), trainable=True, name=decoder1_b_name))
-    decoder1.append(tf.matmul(sample, decoder1_w[cluster_id]) + decoder1_b[cluster_id])
-decoder1_concat = tf.concat(decoder1, 0)
-decoder1_tanh_concat = tf.nn.tanh(decoder1_concat)
+        generate_x = sess.run(model.generator_x_hat_reshape)
+        img = np.ones([300, 300], np.float32)
+        for i in range(10):
+            for j in range(10):
+                img[i*30+1:i*30+29, j*30+1:j*30+29] = generate_x[i+j*BATCH_SIZE, :, :, 0]
+        rescaled = (255 * img).astype(np.uint8)
+        im = Image.fromarray(rescaled)
+        img_name = 'generate/sample.png'
+        im.save(img_name)
 
-decoder2_w = tf.get_variable(shape=[200, 200], trainable=True, name='decoder2_w', initializer=tf.contrib.layers.xavier_initializer())
-decoder2_b = tf.Variable(tf.zeros([200]), trainable=True, name='decoder2_b')
-decoder2 = tf.matmul(decoder1_tanh_concat, decoder2_w) + decoder2_b
-decoder2_tanh = tf.nn.tanh(decoder2)
 
-decoder3_w = tf.get_variable(shape=[200, 784], trainable=True, name='decoder3_w', initializer=tf.contrib.layers.xavier_initializer())
-decoder3_b = tf.Variable(tf.zeros([784]), trainable=True, name='decoder3_b')
-decoder3 = tf.matmul(decoder2_tanh, decoder3_w) + decoder3_b
-x_hat = tf.nn.sigmoid(decoder3)
+def main(dataset):
+    model = VAECluster(BATCH_SIZE, IMG_HEIGHT, IMG_WIDTH,
+                       100, 10, 2, NUM_CLUSTER, LEARNING_RATE)
+    model.build_graph()
+    train_model(model, dataset.train, NUM_EPOCH)
+    test_model(model, dataset.train)
+    test_model(model, dataset.test)
+    generate_sample(model)
 
-x_hat_reshape = tf.reshape(x_hat, shape=[num_cluster, batch_size, 784])
-x_reshape = tf.reshape(x, shape=[1, batch_size, 784])
-x_duplicate = tf.tile(x_reshape, [num_cluster, 1, 1])
 
-logit = x_duplicate * tf.log(x_hat_reshape + 1e-12) + (1 - x_duplicate) * tf.log(1 - x_hat_reshape + 1e-12)
-log_likelihood = tf.reduce_sum(logit, 2)
-
-prior_logit = tf.Variable(tf.zeros([num_cluster]), trainable=True, name='prior_logit')
-prior = tf.nn.softmax(prior_logit, 0)
-prior_reshape = tf.reshape(prior, [num_cluster, 1])
-prior_duplicate = tf.tile(prior_reshape, [1, batch_size])
-log_posterior = log_likelihood + tf.log(prior_duplicate)
-posterior = tf.nn.softmax(log_posterior, dim=0)
-
-generate_loss = tf.reduce_sum(-tf.multiply(log_likelihood, posterior)) / batch_size
-prior_loss = tf.reduce_sum(tf.multiply(posterior, tf.log(posterior + 1e-6) - tf.log(prior_duplicate + 1e-6))) / batch_size
-
-loss = klloss + generate_loss + prior_loss
-
-# set the optimizer
-optimizer = tf.train.AdamOptimizer(learning_rate=learning_rate, epsilon=0.00001).minimize(loss)
-
-# start a session
-sess = tf.Session()
-writer = tf.summary.FileWriter('./graph', sess.graph)
-writer.close()
-
-# Train
-start_time = time.time()
-# 1) run with a random initialization
-sess.run(tf.global_variables_initializer())
-# 2) run with a saved model
-#saver = tf.train.Saver()
-#saver.restore(sess, './model/model.ckpt')
-
-num_batches = int(mnist.train.num_examples / batch_size)
-for i in range(num_epoch):
-    total_loss = 0
-    for batch_id in range(num_batches):
-        x_batch, y_batch = mnist.train.next_batch(batch_size)
-        _, loss_batch = sess.run([optimizer, loss], feed_dict={x: x_batch})
-        sess.run(x, feed_dict={x: x_batch})
-        klloss_val = klloss.eval(session=sess, feed_dict={x: x_batch})
-        generate_loss_val = generate_loss.eval(session=sess, feed_dict={x: x_batch})
-        prior_loss_val = prior_loss.eval(session=sess, feed_dict={x: x_batch})
-        log_likelihood_val = log_likelihood.eval(session=sess, feed_dict={x: x_batch})
-        total_loss += loss_batch
-    print('Epoch = {0}, average loss = {1}.'.format(i, total_loss/num_batches))
-print('Total time = {0}.'.format(time.time() - start_time))
-print('Optimization finished.')
-
-# Save model
-saver = tf.train.Saver()
-save_path = saver.save(sess, './model/model.ckpt')
-
-# Test
-decoder1_test = []
-for cluster_id in range(10):
-    decoder1_test.append(tf.matmul(noise, decoder1_w[cluster_id]) + decoder1_b[cluster_id])
-decoder1_concat_test = tf.concat(decoder1_test, 0)
-decoder1_tanh_concat_test = tf.nn.tanh(decoder1_concat_test)
-
-decoder2_test = tf.matmul(decoder1_tanh_concat_test, decoder2_w) + decoder2_b
-decoder2_tanh_test = tf.nn.tanh(decoder2_test)
-
-decoder3_test = tf.matmul(decoder2_tanh_test, decoder3_w) + decoder3_b
-x_hat_test = tf.nn.sigmoid(decoder3_test)
-
-x_hat_reshape_test = tf.reshape(x_hat_test, [num_cluster, batch_size, 784])
-
-sess.run(x_hat_reshape_test)
-samples = x_hat_reshape_test.eval(session=sess)
-for i in range(10):
-    img = np.ones([300, 300], dtype=np.float32)
-    for h in range(10):
-        for w in range(10):
-            img[30*h-29:30*h-1, 30*w-29:30*w-1] = np.reshape(samples[w, i*10 + h, :], [28, 28])
-    rescaled = (255 * img).astype(np.uint8)
-    im = Image.fromarray(rescaled)
-    img_name = 'generate/' + str(i) + '.png'
-    im.save(img_name)
+if __name__ == '__main__':
+    main(mnist)

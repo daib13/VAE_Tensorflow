@@ -1,2 +1,6 @@
-model_checkpoint_path: "model.ckpt"
-all_model_checkpoint_paths: "model.ckpt"
+model_checkpoint_path: "VAE_Clustering210649"
+all_model_checkpoint_paths: "VAE_Clustering208449"
+all_model_checkpoint_paths: "VAE_Clustering208999"
+all_model_checkpoint_paths: "VAE_Clustering209549"
+all_model_checkpoint_paths: "VAE_Clustering210099"
+all_model_checkpoint_paths: "VAE_Clustering210649"
