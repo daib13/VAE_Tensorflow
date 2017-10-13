@@ -3,8 +3,147 @@ from tensorflow.contrib import layers
 import os
 import sys
 import numpy as np
-from mnist import MNIST
+import data_util as du
 from munkres import Munkres, print_matrix
+import math
+
+DIM_LAYER = [784, 500, 500, 2000, 10]
+NUM_CLUSTER = 10
+
+
+class SaeNet:
+    class SubSaeNet:
+        def __init__(self, input_type, input_dim, hidden_type, hidden_dim, parent_net, previous_net=None):
+            self.protector = parent_net.protector
+            self.batch_size = parent_net.batch_size
+            if previous_net:
+                self.depth = previous_net.depth + 1
+            else:
+                self.depth = 1
+            with tf.name_scope('Depth' + str(self.depth)):
+                self.global_step = tf.Variable(0, False, name='global_step', dtype=tf.int32)
+                if previous_net:
+                    self.input = tf.stop_gradient(previous_net.hidden)
+                else:
+                    self.input = parent_net.x
+                with tf.variable_scope('Depth' + str(self.depth)):
+                    self.encoder_w = tf.get_variable('encoder_w', [input_dim, hidden_dim],
+                                                     tf.float32, layers.xavier_initializer(), trainable=True)
+                    self.encoder_b = tf.get_variable('encoder_b', [hidden_dim], tf.float32,
+                                                     tf.zeros_initializer(), trainable=True)
+                    self.decoder_w = tf.get_variable('decoder_w', [hidden_dim, input_dim],
+                                                     tf.float32, layers.xavier_initializer(), trainable=True)
+                    self.decoder_b = tf.get_variable('decoder_b', [input_dim], tf.float32,
+                                                     tf.zeros_initializer(), trainable=True)
+                with tf.name_scope('Encoder'):
+                    if hidden_type == 'free':
+                        self.hidden = tf.matmul(self.input, self.encoder_w) + self.encoder_b
+                    elif hidden_type == 'relu':
+                        self.hidden = tf.nn.relu(tf.matmul(self.input, self.encoder_w) + self.encoder_b)
+                    elif hidden_type == 'tanh':
+                        self.hidden = tf.nn.tanh(tf.matmul(self.input, self.encoder_w) + self.encoder_b)
+                    elif hidden_type == 'sigmoid':
+                        self.hidden = tf.nn.sigmoid(tf.matmul(self.input, self.encoder_w) + self.encoder_b)
+                with tf.name_scope('Decoder'):
+                    if input_type == 'free':
+                        self.output = tf.matmul(self.hidden, self.decoder_w) + self.decoder_b
+                    elif input_type == 'relu':
+                        self.output = tf.nn.relu(tf.matmul(self.hidden, self.decoder_w) + self.decoder_b)
+                    elif input_type == 'tanh':
+                        self.output = tf.nn.tanh(tf.matmul(self.hidden, self.decoder_w) + self.decoder_b)
+                    elif input_type == 'sigmoid':
+                        self.output = tf.nn.sigmoid(tf.matmul(self.hidden, self.decoder_w) + self.decoder_b)
+                with tf.name_scope('Loss'):
+                    if input_type == 'sigmoid':
+                        self.loss = (-self.input * tf.log(self.output + self.protector)
+                                     - (1 - self.input) * (tf.log(1 - self.output + self.protector))) / self.batch_size
+                    else:
+                        self.loss = tf.square(self.input - self.output) / self.batch_size
+                with tf.name_scope('Optimizer'):
+                    self.optimizer = tf.train.AdamOptimizer(parent_net.learning_rate,
+                                                            epsilon=parent_net.epsilon).minimize(self.loss,
+                                                                                                 self.global_step)
+                with tf.name_scope('Summary'):
+                    self.summary = tf.summary.scalar('loss', self.loss)
+
+    def __init__(self, dim_layer, batch_size, epsilon, data_type):
+        self.dim_layer = dim_layer
+        self.batch_size = batch_size
+        self.num_hidden_layer = len(dim_layer) - 1
+        for i in range(self.num_hidden_layer + 1):
+            assert dim_layer[i] > 0
+        self.data_type = data_type
+        self.protector = 1e-20
+        self.epsilon = epsilon
+        self.global_step = tf.Variable(0, False, dtype=tf.int32, name='global_step')
+
+    def __create_layerwise_net(self):
+        with tf.name_scope('SAE'):
+            self.x = tf.placeholder(tf.float32, [self.batch_size, self.dim_layer[0]], 'x')
+        with tf.name_scope('LearningRate'):
+            self.learning_rate = tf.placeholder(tf.float32, [], 'learning_rate')
+        self.sub_net = []
+        for i in range(self.num_hidden_layer):
+            if i == 0:
+                self.input_type = self.data_type
+                self.previous_net = None
+            else:
+                self.input_type = 'relu'
+                self.previous_net = self.sub_net[i-1]
+            if i == self.num_hidden_layer - 1:
+                self.hidden_type = 'free'
+            else:
+                self.hidden_type = 'relu'
+            self.sub_net.append(self.SubSaeNet(self.input_type, self.dim_layer[i],
+                                               self.hidden_type, self.dim_layer[i + 1],
+                                               self, self.previous_net))
+
+    def __create_net(self):
+        with tf.name_scope('SAE'):
+            self.previous_tensor = self.x
+            with tf.name_scope('Encoder'):
+                self.encoder = []
+                for i in range(self.num_hidden_layer):
+                    with tf.variable_scope('Depth' + str(i + 1), reuse=True):
+                        self.w = tf.get_variable('encoder_w')
+                        self.b = tf.get_variable('encoder_b')
+                    if i == self.num_hidden_layer - 1:
+                        self.encoder.append(tf.matmul(self.previous_tensor, self.w) + self.b)
+                    else:
+                        self.encoder.append(tf.nn.relu(tf.matmul(self.previous_tensor, self.w) + self.b))
+                    self.previous_tensor = self.encoder[i]
+            with tf.name_scope('Decoder'):
+                self.decoder = []
+                for i in range(self.num_hidden_layer):
+                    with tf.variable_scope('Depth' + str(self.num_hidden_layer - i), reuse=True):
+                        self.w = tf.get_variable('decoder_w')
+                        self.b = tf.get_variable('decoder_b')
+                    if i == self.num_hidden_layer - 1:
+                        if self.data_type == 'free':
+                            self.decoder.append(tf.matmul(self.previous_tensor, self.w) + self.b)
+                        elif self.data_type == 'sigmoid':
+                            self.decoder.append(tf.nn.sigmoid(tf.matmul(self.previous_tensor, self.w)) + self.b)
+                    else:
+                        self.decoder.append(tf.nn.relu(tf.matmul(self.previous_tensor, self.w)) + self.b)
+                    self.previous_tensor = self.decoder[i]
+            with tf.name_scope('Loss'):
+                if self.data_type == 'sigmoid':
+                    self.loss = (- self.x * tf.log(self.decoder[self.num_hidden_layer-1] + self.protector)
+                                 - (1 - self.x) * tf.log(1 - self.decoder[self.num_hidden_layer-1] + self.protector)) \
+                                / self.batch_size
+                else:
+                    self.loss = tf.square(self.x - self.decoder[self.num_hidden_layer-1]) / self.batch_size
+            with tf.name_scope('Optimizer'):
+                self.optimizer = tf.train.AdamOptimizer(self.learning_rate,
+                                                        epsilon=self.epsilon).minimize(self.loss,
+                                                                                       self.global_step)
+            with tf.name_scope('Summary'):
+                self.summary = tf.summary.scalar('loss', self.loss)
+
+    def build_graph(self):
+        self.__create_layerwise_net()
+        self.__create_net()
+
 
 class VAE_GMM:
     def __init__(self, batch_size, input_dim,
@@ -134,28 +273,9 @@ class VAE_GMM:
         self.__create_loss()
         self.__create_optimizer()
         self.__create_summary()
-        
-
-def load_mnist_data(flag='training'):
-    mndata = MNIST('../data/MNIST')
-    try:
-        if flag == 'training':
-            images, labels = mndata.load_training()
-        elif flag == 'testing':
-            images, labels = mndata.load_testing()
-        else:
-            raise Exception('Flag should be either training or testing.')
-    except Exception:
-        print("Flag error")
-        raise
-    images_array = np.array(images) / 255
-    labels_array = np.array(labels)
-    one_hot_labels = np.zeros((labels_array.size, labels_array.max() + 1))
-    one_hot_labels[np.arange(labels_array.size), labels_array] = 1
-    return images_array, one_hot_labels
 
 
-def train_model(model, x, y, num_epoch):
+def train_model(model, x, y):
     saver = tf.train.Saver()
     if not os.path.exists('./model'):
         os.mkdir('./model')
@@ -167,35 +287,27 @@ def train_model(model, x, y, num_epoch):
         if ckpt and ckpt.model_checkpoint_path:
             saver.restore(sess, ckpt.model_checkpoint_path)
 
-        # train autoencoder
-        total_loss = 0
+        # train stack autoencoder
         writer = tf.summary.FileWriter('graph', sess.graph)
-        initial_step = model.global_step.eval()
-        iteration_per_epoch = x.shape[0] / model.batch_size
-        finish_step = num_epoch * iteration_per_epoch
-        start_idx = 0
-        epoch_id = 0
-        end_idx = start_idx + model.batch_size
-        for index in range(initial_step, int(finish_step)):
-            feed_dict = {model.x: x[start_idx:end_idx, :], model.y: y[start_idx:end_idx]}
-            start_idx += model.batch_size
-            end_idx += model.batch_size
-            if end_idx >= x.shape[0]:
-                start_idx = 0
-                end_idx = start_idx + model.batch_size
-                epoch_id += 1
-                if epoch_id % 10 == 0:
-                    model.learning_rate *= 0.9
-            batch_loss, _, summary = sess.run([model.loss, model.optimizer, model.summary], feed_dict=feed_dict)
-            total_loss += batch_loss
-            writer.add_summary(summary, index)
+        iteration_per_epoch = int(math.floor(x.shape[0] / model.batch_size))
 
-            if (index + 1) % iteration_per_epoch == 0:
-                print('Iter = {0}, loss = {1}.'.format(index, total_loss / iteration_per_epoch))
+        for i in range(model.num_hidden_layer):
+            for epoch in range(10):
+                x, y = du.shuffle(x, y)
                 total_loss = 0
-
-            if (index + 1) % iteration_per_epoch == 0:
-                saver.save(sess, 'model/VAE' + str(index))
+                lr = 0.002
+                for index in range(iteration_per_epoch):
+                    start_idx = index * model.batch_size
+                    end_idx = start_idx + model.batch_size
+                    feed_dict = {model.x: x[start_idx:end_idx, :], model.learning_rate: lr}
+                    submodel = model.sub_net[i]
+                    batch_loss, _, summary = sess.run([submodel.loss, submodel.optimizer, submodel.summary],
+                                                      feed_dict=feed_dict)
+                    total_loss += batch_loss
+                    writer.add_summary(summary, index)
+                total_loss /= iteration_per_epoch
+                print('Layer = {0}, epoch = {1}, loss = {2}.'.format(i, epoch, total_loss))
+                saver.save(sess, 'model/SAE' + str(i) + '_' + str(epoch))
 
 
 def test_model(model, x, y):
@@ -231,18 +343,16 @@ def test_model(model, x, y):
 
 
 def main():
-    NUM_EPOCH = 300
 
-    images_train, labels_train = load_mnist_data('training')
-    images_test, labels_test = load_mnist_data('testing')
+    images_train, labels_train = du.load_mnist_data('training')
+#    images_test, labels_test = load_mnist_data('testing')
 
-    model = VAE_GMM(100, 784, 10, 0.002, 0.00001)
+    model = SaeNet(DIM_LAYER, 100, 0.0001, 'sigmoid')
     model.build_graph()
 
-    train_model(model, images_train, labels_train, NUM_EPOCH)
-    test_model(model, images_train, labels_train)
-    test_model(model, images_test, labels_test)
+    train_model(model, images_train, labels_train)
 
 
 if __name__ == '__main__':
+    os.environ['CUDA_VISIBLE_DEVICES'] = '0'
     main()
